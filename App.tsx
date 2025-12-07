@@ -3,27 +3,56 @@ import React, { useState, useEffect, useRef } from 'react';
 import { BookProject, AppView, Source, SourceType, WritingStyle, ChapterContent } from './types';
 import { Dashboard } from './components/Dashboard';
 import { ProjectEditor } from './components/ProjectEditor';
+import { AuthPage } from './components/AuthPage';
 import { writeChapter } from './services/gemini';
+import { supabase } from './services/supabase';
+import { User } from '@supabase/supabase-js';
 
 const App: React.FC = () => {
   const [view, setView] = useState<AppView>(AppView.DASHBOARD);
   const [projects, setProjects] = useState<BookProject[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
-  
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
   // Background Generation State
   const [generatingProjectId, setGeneratingProjectId] = useState<string | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
+  // Check authentication state
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        setUser(session?.user ?? null);
+      } catch (error) {
+        console.error('Auth initialization error:', error);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+
+    initAuth();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
   // Load projects from localStorage on mount
   useEffect(() => {
+    if (!user) return;
+
     try {
-      const saved = localStorage.getItem('storyforge_projects');
+      const saved = localStorage.getItem(`storyforge_projects_${user.id}`);
       if (saved) {
         setProjects(JSON.parse(saved));
       }
-      
+
       // Session Restoration
-      const lastActiveId = localStorage.getItem('storyforge_active_project');
+      const lastActiveId = localStorage.getItem(`storyforge_active_project_${user.id}`);
       if (lastActiveId && saved) {
         const parsedProjects = JSON.parse(saved) as BookProject[];
         if (parsedProjects.find(p => p.id === lastActiveId)) {
@@ -35,26 +64,28 @@ const App: React.FC = () => {
     } catch (e) {
       console.error("Failed to load projects", e);
     }
-  }, []);
+  }, [user]);
 
   // Save projects to localStorage whenever they change
   useEffect(() => {
+    if (!user) return;
+
     try {
-      localStorage.setItem('storyforge_projects', JSON.stringify(projects));
-      
+      localStorage.setItem(`storyforge_projects_${user.id}`, JSON.stringify(projects));
+
       if (activeProjectId) {
-         localStorage.setItem('storyforge_active_project', activeProjectId);
+         localStorage.setItem(`storyforge_active_project_${user.id}`, activeProjectId);
       } else {
-         localStorage.removeItem('storyforge_active_project');
+         localStorage.removeItem(`storyforge_active_project_${user.id}`);
       }
     } catch (e: any) {
       if (e.name === 'QuotaExceededError' || e.code === 22) {
-        alert("⚠️ Storage Full! Your project is too large to save automatically. Please delete old projects or fewer images to prevent data loss.");
+        alert("Storage Full! Your project is too large to save automatically. Please delete old projects or fewer images to prevent data loss.");
       } else {
         console.error("Failed to save project", e);
       }
     }
-  }, [projects, activeProjectId]);
+  }, [projects, activeProjectId, user]);
 
   // Handle Browser Back Button
   useEffect(() => {
@@ -268,12 +299,27 @@ ${originalProject.outline?.chapters.map(c => `Chapter ${c.chapterNumber}: ${c.ti
     window.history.pushState({ view: AppView.DASHBOARD }, '');
   };
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-blue-100 border-t-blue-600 rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-slate-600 font-medium">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthPage onAuthSuccess={() => setAuthLoading(false)} />;
+  }
+
   const activeProject = projects.find(p => p.id === activeProjectId);
 
   if (view === AppView.EDITOR && activeProject) {
     return (
-      <ProjectEditor 
-        project={activeProject} 
+      <ProjectEditor
+        project={activeProject}
         onUpdateProject={handleUpdateProject}
         onBack={handleBackToDashboard}
         onStartGeneration={(style) => startBookGeneration(activeProject.id, style)}
@@ -283,13 +329,19 @@ ${originalProject.outline?.chapters.map(c => `Chapter ${c.chapterNumber}: ${c.ti
   }
 
   return (
-    <Dashboard 
-      projects={projects} 
+    <Dashboard
+      projects={projects}
       onCreateProject={handleCreateProject}
       onSelectProject={handleSelectProject}
       onDeleteProject={handleDeleteProject}
       onCreateSequel={handleCreateSequel}
       generatingProjectId={generatingProjectId}
+      user={user}
+      onSignOut={async () => {
+        await supabase.auth.signOut();
+        setProjects([]);
+        setActiveProjectId(null);
+      }}
     />
   );
 };
